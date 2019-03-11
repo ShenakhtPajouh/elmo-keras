@@ -1,6 +1,9 @@
 import numpy as np
 import tensorflow as tf
 
+DTYPE = 'float32'
+DTYPE_INT = 'int64'
+
 
 class Convolution(tf.keras.layers.Layer):  # done
     def __init__(self, filters, cnn_options, char_embed_dim, max_chars, activation, name=None, trainable=True):
@@ -58,6 +61,32 @@ class Convolution(tf.keras.layers.Layer):  # done
             convolutions.append(conv)
 
         return tf.concat(convolutions)
+
+    def __call__(self, inputs, **kwargs):
+        super().__call__(inputs=inputs, **kwargs)
+
+
+class Projection(tf.keras.layers.Layer):
+    def __init__(self, n_filters, projection_dim, trainable=True, name=None, dtype=None, **kwargs):
+        super().__init__(trainable, name, dtype, **kwargs)
+        self.n_filters = n_filters
+        self.projection_dim = projection_dim
+        self.W_proj_cnn = None
+        self.b_proj_cnn = None
+
+    def call(self, inputs, **kwargs):
+        return tf.matmul(inputs, self.W_proj_cnn) + self.b_proj_cnn
+
+    def build(self, input_shape):
+        self.W_proj_cnn = self.add_weight(
+            name="W_proj", shape=[self.n_filters, self.projection_dim],
+            initializer=tf.random_normal_initializer(
+                mean=0.0, stddev=np.sqrt(1.0 / self.n_filters)),
+            dtype=DTYPE)
+        self.b_proj_cnn = tf.get_variable(
+            name="b_proj", shape=[self.projection_dim],
+            initializer=tf.constant_initializer(0.0),
+            dtype=DTYPE)
 
     def __call__(self, inputs, **kwargs):
         super().__call__(inputs=inputs, **kwargs)
