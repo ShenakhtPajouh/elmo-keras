@@ -12,11 +12,13 @@ class Convolution(tf.keras.layers.Layer):  # done
         self.cnn_options = cnn_options
         self.char_embed_dim = char_embed_dim
         self.activation = activation
+        self.max_chars = max_chars
         self.w = None
         self.b = None
 
     def build(self, input_shape):  # done
         for i, (width, num) in enumerate(self.filters):
+            w_init = None
             if self.cnn_options['activation'] == 'relu':
                 # He initialization for ReLU activation
                 # with char embeddings init between -1 and 1
@@ -34,12 +36,12 @@ class Convolution(tf.keras.layers.Layer):  # done
                     mean=0.0,
                     stddev=np.sqrt(1.0 / (width * self.char_embed_dim))
                 )
-            w = self.add_weight(
+            self.w = self.add_weight(
                 name="W_cnn_%s" % i,
                 shape=[1, width, self.char_embed_dim, num],
                 initializer=w_init,
                 dtype=DTYPE)
-            b = self.add_weight(
+            self.b = self.add_weight(
                 name="b_cnn_%s" % i, shape=[num], dtype=DTYPE,
                 initializer=tf.constant_initializer(0.0))
 
@@ -62,9 +64,6 @@ class Convolution(tf.keras.layers.Layer):  # done
 
         return tf.concat(convolutions)
 
-    def __call__(self, inputs, **kwargs):
-        super().__call__(inputs=inputs, **kwargs)
-
 
 class Projection(tf.keras.layers.Layer):
     def __init__(self, n_filters, projection_dim, trainable=True, name=None, dtype=None, **kwargs):
@@ -83,10 +82,47 @@ class Projection(tf.keras.layers.Layer):
             initializer=tf.random_normal_initializer(
                 mean=0.0, stddev=np.sqrt(1.0 / self.n_filters)),
             dtype=DTYPE)
-        self.b_proj_cnn = tf.get_variable(
+        self.b_proj_cnn = self.add_weight(
             name="b_proj", shape=[self.projection_dim],
             initializer=tf.constant_initializer(0.0),
             dtype=DTYPE)
 
-    def __call__(self, inputs, **kwargs):
-        super().__call__(inputs=inputs, **kwargs)
+
+def high(x, ww_carry, bb_carry, ww_tr, bb_tr):
+    carry_gate = tf.nn.sigmoid(tf.matmul(x, ww_carry) + bb_carry)
+    transform_gate = tf.nn.relu(tf.matmul(x, ww_tr) + bb_tr)
+    return carry_gate * transform_gate + (1.0 - carry_gate) * x
+
+
+class Transformation(tf.keras.layers.Layer):
+    def __init__(self, highway_dim, trainable=True, name=None, dtype=None, **kwargs):
+        super().__init__(trainable, name, dtype, **kwargs)
+        self.highway_dim = highway_dim
+        self.W_carry = None
+        self.b_carry = None
+        self.W_transform = None
+        self.b_transform = None
+
+    def build(self, input_shape):
+        self.W_carry = self.add_weight(
+            'W_carry', [self.highway_dim, self.highway_dim],
+            # glorit init
+            initializer=tf.random_normal_initializer(
+                mean=0.0, stddev=np.sqrt(1.0 / self.highway_dim)),
+            dtype=DTYPE)
+        self.b_carry = tf.get_variable(
+            'b_carry', [self.highway_dim],
+            initializer=tf.constant_initializer(-2.0),
+            dtype=DTYPE)
+        self.W_transform = tf.get_variable(
+            'W_transform', [self.highway_dim, self.highway_dim],
+            initializer=tf.random_normal_initializer(
+                mean=0.0, stddev=np.sqrt(1.0 / self.highway_dim)),
+            dtype=DTYPE)
+        self.b_transform = tf.get_variable(
+            initializer=tf.constant_initializer(0.0),
+            dtype=DTYPE)
+
+    def call(self, inputs, **kwargs):
+        high(inputs, self.W_carry, self.b_carry,
+             self.W_transform, self.b_transform)
