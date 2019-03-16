@@ -71,8 +71,9 @@ class BidirectionalLanguageModel(tf.keras.Model):
 
         return ret
 
-    def _build_ops(self):  # TODO: complete
+    def _build_ops(self):
         with tf.control_dependencies([self.lm_graph.update_state_op]):
+            # get the LM embeddings
             token_embeddings = self.lm_graph.embedding
             layers = [
                 tf.concat([token_embeddings, token_embeddings], axis=2)
@@ -219,7 +220,8 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
             activation = tf.nn.relu
 
         # the character embeddings
-        self.Char_Embedding = EmbeddingLookup(n_tokens=n_chars, embed_dim=char_embed_dim)
+        with tf.device("/cpu:0"):
+            self.Char_Embedding = EmbeddingLookup(n_tokens=n_chars, embed_dim=char_embed_dim)
 
         # the convolutions
         self.ConvLayer = Convolution(max_chars=max_chars, activation=activation, filters=filters,
@@ -235,7 +237,7 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         # set up weights for projection
 
         if self.use_proj:
-            tf.assert_greater_equal(self.n_filters, self.projection_dim)
+            tf.assert_greater(self.n_filters, self.projection_dim)
             self.projection_layer = Projection(n_filters=self.n_filters, projection_dim=self.projection_dim,
                                                name="CNN_proj")
 
@@ -251,9 +253,10 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         projection_dim = self.options['lstm']['projection_dim']
 
         # the word embeddings
-        self.EmbeddingLookup = EmbeddingLookup(
-            name="embedding", n_tokens=self._n_tokens_vocab, embed_dim=projection_dim,
-            dtype=DTYPE)
+        with tf.device("/cpu:0"):
+            self.EmbeddingLookup = EmbeddingLookup(
+                name="embedding", n_tokens=self._n_tokens_vocab, embed_dim=projection_dim,
+                dtype=DTYPE)
 
     def _build_lstms(self):
         # now the LSTMs
@@ -280,26 +283,12 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         self.init_states = {'forward': [], 'backward': []}
         self.update_state_op = None
 
-        update_ops = []
         for direction in ['forward', 'backward']:
             for i in range(self.n_lstm_layers):
                 self.lstm_cell = tf.keras.layers.LSTMCell(units=lstm_dim)
 
-                """
-                if use_skip_connections:
-                    # ResidualWrapper adds inputs to outputs
-                    if i == 0:
-                        # don't add skip connection from token embedding to
-                        # 1st layer output
-                        pass
-                    else:
-                        # add a skip connection
-                        lstm_cell = tf.nn.rnn_cell.ResidualWrapper(lstm_cell)
-                """
-
                 # collect the input state, run the dynamic rnn, collect
                 # the output
-                state_size = self.lstm_cell.state_size
                 # the LSTMs are stateful.  To support multiple batch sizes,
                 # we'll allocate size for states up to max_batch_size,
                 # then use the first batch_size entries for each batch
@@ -314,7 +303,7 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
     def build(self, input_shape):
         for direction in ['forward', 'backward']:
             for i in range(self.n_lstm_layers):
-                self.init_states[direction].extend([
+                self.init_states[direction].append([
                     self.add_weight(
                         shape=[self._max_batch_size, dim], trainable=False, initializer=tf.zeros_initializer()
                     )
@@ -323,7 +312,8 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
 
     def call(self, inputs, training=None, mask=None):
         if self.use_character_inputs:
-            char_embedding = self.Char_Embedding(inputs)
+            with tf.device("/cpu:0"):
+                char_embedding = self.Char_Embedding(inputs)
             embedding = self.ConvLayer(char_embedding)
             batch_size_n_tokens = None
 
@@ -346,53 +336,57 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
 
             self.embedding = embedding
         else:
-            self.embedding = self.EmbeddingLookup(inputs)
+            with tf.device("/cpu:0"):
+                self.embedding = self.EmbeddingLookup(inputs)
 
         # the sequence lengths from input mask
         if self.use_character_inputs:
-            mask = tf.reduce_any(self.ids_placeholder > 0, axis=2)
+            mask = tf.reduce_any(inputs > 0, axis=2)
         else:
-            mask = self.ids_placeholder > 0
+            mask = inputs > 0
         sequence_lengths = tf.reduce_sum(tf.cast(mask, tf.int32), axis=1)
         batch_size = tf.shape(sequence_lengths)[0]
         update_ops = []
         for direction in ['forward', 'backward']:
+            if direction == 'forward':
+                layer_input = self.embedding
+            else:
+                layer_input = tf.reverse_sequence(
+                    self.embedding,
+                    sequence_lengths,
+                    seq_axis=1,
+                    batch_axis=0
+                )
             for i in range(self.n_lstm_layers):
-                if direction == 'forward':
-                    layer_input = self.embedding
-                else:
-                    layer_input = tf.reverse_sequence(
-                        self.embedding,
-                        sequence_lengths,
-                        seq_axis=1,
-                        batch_axis=0
-                    )
                 batch_init_states = [
                     state[:batch_size, :] for state in self.init_states
                 ]
-                final_state, h, layer_output = self.RNN(layer_input, initial_state=batch_init_states)
+                hidden_seq, final_hidden_state, final_cell_state = self.RNN(layer_input,
+                                                                            initial_state=batch_init_states)
                 self.lstm_state_sizes[direction].append(self.lstm_cell.state_size)
                 self.lstm_init_states[direction].append(self.init_states[direction][i])
-                self.lstm_final_states[direction].append(final_state)
+                self.lstm_final_states[direction].append(
+                    tf.nn.rnn_cell.LSTMStateTuple(final_cell_state, final_hidden_state))
                 if direction == 'forward':
-                    self.lstm_outputs[direction].append(layer_output)
+                    self.lstm_outputs[direction].append(hidden_seq)
                 else:
                     self.lstm_outputs[direction].append(
                         tf.reverse_sequence(
-                            layer_output,
+                            hidden_seq,
                             sequence_lengths,
                             seq_axis=1,
                             batch_axis=0
                         )
                     )
-                with tf.control_dependencies([layer_output]):
+                with tf.control_dependencies([hidden_seq]):
                     # update the initial states
                     for j in range(2):
                         new_state = tf.concat(
-                            [final_state[j][:batch_size, :],
+                            [final_hidden_state[j][:batch_size, :],
                              self.init_states[direction][i][j][batch_size:, :]], axis=0)
                         state_update_op = tf.assign(self.init_states[direction][i][j], new_state)
                         update_ops.append(state_update_op)
+                layer_input = hidden_seq
         self.mask = mask
         self.sequence_lengths = sequence_lengths
         self.update_state_op = tf.group(*update_ops)

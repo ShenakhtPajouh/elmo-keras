@@ -8,7 +8,7 @@ class WeightLayer(tf.keras.layers.Layer):
 
     For each output layer, this returns two ops.  The first computes
         a layer specific weighted average of the biLM layers, and
-        the second the l2 regularizer loss term.
+        the second the l2 regularizer loss  term.
     The regularization terms are also add to tf.GraphKeys.REGULARIZATION_LOSSES
     bilm_ops = the tensorflow ops returned to compute internal
         representations from a biLM.  This is the return value
