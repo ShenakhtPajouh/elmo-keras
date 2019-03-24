@@ -1,21 +1,33 @@
+import collections
+import json
+
+import h5py
 import numpy as np
 import tensorflow as tf
-import h5py
-import json
-import re
+from tensorflow.python.eager import context
+from tensorflow.python.keras import activations
+from tensorflow.python.keras import initializers
+from tensorflow.python.keras.engine import input_spec
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import clip_ops
+from tensorflow.python.ops import init_ops
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import nn_ops
+from tensorflow.python.platform import tf_logging as logging
 
 DTYPE = 'float32'
 DTYPE_INT = 'int64'
+_BIAS_VARIABLE_NAME = "bias"
+_WEIGHTS_VARIABLE_NAME = "kernel"
 
 
-class BidirectionalLanguageModel(tf.keras.Model):
-    def __init__(self,
-                 options_file: str,
+class BidirectionalLanguageModel(tf.keras.models.Model):
+    def __init__(self, options_file: str,
                  weight_file: str,
                  use_character_inputs=True,
                  embedding_weight_file=None,
-                 max_batch_size=128, ):
-        '''
+                 max_batch_size=128, *args, **kwargs):
+        """
         Creates the language model computational graph and loads weights
 
         Two options for input type:
@@ -34,8 +46,8 @@ class BidirectionalLanguageModel(tf.keras.Model):
         use_character_inputs: if True, then use character ids as input,
             otherwise use token ids
         max_batch_size: the maximum allowable batch size
-        '''
-        super().__init__()
+        """
+        super().__init__(*args, **kwargs)
         with open(options_file, 'r') as fin:
             options = json.load(fin)
 
@@ -52,7 +64,7 @@ class BidirectionalLanguageModel(tf.keras.Model):
         self._max_batch_size = max_batch_size
 
         self._ops = {}
-        self.lm_graph = BidirectionalLanguageModelGraph(self._options, self._weight_file, name='bilm',
+        self.lm_graph = BidirectionalLanguageModelGraph(self._options, name='bilm',
                                                         embedding_weight_file=self._embedding_weight_file,
                                                         use_character_inputs=self._use_character_inputs,
                                                         max_batch_size=self._max_batch_size)
@@ -64,17 +76,16 @@ class BidirectionalLanguageModel(tf.keras.Model):
 
         else:
             # need to create the graph
-            self.lm_graph(inputs=inputs)
-            ops = self._build_ops()
+            token_embeddings = self.lm_graph(inputs=inputs)
+            ops = self._build_ops(token_embeddings)
             self._ops[inputs] = ops
             ret = ops
 
         return ret
 
-    def _build_ops(self):
+    def _build_ops(self, token_embeddings):
         with tf.control_dependencies([self.lm_graph.update_state_op]):
             # get the LM embeddings
-            token_embeddings = self.lm_graph.embedding
             layers = [
                 tf.concat([token_embeddings, token_embeddings], axis=2)
             ]
@@ -144,20 +155,19 @@ class BidirectionalLanguageModel(tf.keras.Model):
             }
 
 
-class BidirectionalLanguageModelGraph(tf.keras.Model):
-    '''
+class BidirectionalLanguageModelGraph(tf.keras.models.Model):
+    """
         Creates the computational graph and holds the ops necessary for runnint
         a bidirectional language model
-    '''
+    """
 
-    def __init__(self, options, weight_file, initializer=None, name=None, trainable=False, use_character_inputs=True,
+    def __init__(self, options, name=None, use_character_inputs=True,
                  embedding_weight_file=None,
                  max_batch_size=128):
-        super().__init__(name=name, trainable=trainable)
+        super().__init__(name=name)
         self.options = options
         self._max_batch_size = max_batch_size
         self.use_character_inputs = use_character_inputs
-        self.trainable = trainable
         self.embedding = None
         self.mask = None
         self.sequence_lengths = None
@@ -179,7 +189,7 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         self._build_lstms()
 
     def _build_word_char_embeddings(self):
-        '''
+        """
         options contains key 'char_cnn': {
         'n_characters': 262,
         # includes the start / end characters
@@ -200,7 +210,7 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         # if omitted, then no highway layers
         'n_highway': 2,
         }
-        '''
+        """
         self.projection_dim = self.options['lstm']['projection_dim']
 
         cnn_options = self.options['char_cnn']
@@ -221,7 +231,7 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
 
         # the character embeddings
         with tf.device("/cpu:0"):
-            self.Char_Embedding = EmbeddingLookup(n_tokens=n_chars, embed_dim=char_embed_dim)
+            self.Char_Embedding = EmbeddingLookup(name="a", n_tokens=n_chars, embed_dim=char_embed_dim)
 
         # the convolutions
         self.ConvLayer = Convolution(max_chars=max_chars, activation=activation, filters=filters,
@@ -267,8 +277,6 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         lstm_dim = self.options['lstm']['dim']
         projection_dim = self.options['lstm']['projection_dim']
         self.n_lstm_layers = self.options['lstm'].get('n_layers', 1)
-        cell_clip = self.options['lstm'].get('cell_clip')
-        proj_clip = self.options['lstm'].get('proj_clip')
         use_skip_connections = self.options['lstm']['use_skip_connections']
         if use_skip_connections:
             print("USING SKIP CONNECTIONS")
@@ -281,11 +289,23 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         self.lstm_init_states = {'forward': [], 'backward': []}
         self.lstm_final_states = {'forward': [], 'backward': []}
         self.init_states = {'forward': [], 'backward': []}
+        self.RNN = {'forward': [], 'backward': []}
+        cell_clip = self.options['lstm'].get('cell_clip')
+        proj_clip = self.options['lstm'].get('proj_clip')
+
         self.update_state_op = None
 
         for direction in ['forward', 'backward']:
             for i in range(self.n_lstm_layers):
-                self.lstm_cell = tf.keras.layers.LSTMCell(units=lstm_dim)
+                if projection_dim < lstm_dim:
+                    # are projecting down output
+                    self.lstm_cell = TFLSTMCell(
+                        lstm_dim, num_proj=projection_dim,
+                        cell_clip=cell_clip, proj_clip=proj_clip)
+                else:
+                    self.lstm_cell = TFLSTMCell(
+                        lstm_dim,
+                        cell_clip=cell_clip, proj_clip=proj_clip)
 
                 # collect the input state, run the dynamic rnn, collect
                 # the output
@@ -297,20 +317,23 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
                     i_direction = 0
                 else:
                     i_direction = 1
-                self.RNN = tf.keras.layers.RNN(name='RNN_{0}/RNN/MultiRNNCell/Cell{1}'.format(i_direction, i),
-                                               cell=self.lstm_cell, return_sequences=True, return_state=True)
+                self.RNN[direction].append(
+                    tf.keras.layers.RNN(name='RNN_{0}/RNN/MultiRNNCell/Cell{1}'.format(i_direction, i),
+                                        cell=self.lstm_cell, return_sequences=True, return_state=True))
 
     def build(self, input_shape):
         for direction in ['forward', 'backward']:
             for i in range(self.n_lstm_layers):
                 self.init_states[direction].append([
-                    self.add_weight(
-                        shape=[self._max_batch_size, dim], trainable=False, initializer=tf.zeros_initializer()
-                    )
+                    self.add_weight(name='Variable',
+                                    shape=[self._max_batch_size, dim], trainable=False,
+                                    initializer=tf.zeros_initializer(), dtype=DTYPE
+                                    )
                     for dim in self.lstm_cell.state_size
                 ])
 
     def call(self, inputs, training=None, mask=None):
+        embedding = None
         if self.use_character_inputs:
             with tf.device("/cpu:0"):
                 char_embedding = self.Char_Embedding(inputs)
@@ -359,10 +382,11 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
                 )
             for i in range(self.n_lstm_layers):
                 batch_init_states = [
-                    state[:batch_size, :] for state in self.init_states
+                    state[:batch_size, :] for state in self.init_states[direction][i]
                 ]
-                hidden_seq, final_hidden_state, final_cell_state = self.RNN(layer_input,
-                                                                            initial_state=batch_init_states)
+                hidden_seq, final_hidden_state, final_cell_state = self.RNN[direction][i](layer_input,
+                                                                                          initial_state=batch_init_states)
+
                 self.lstm_state_sizes[direction].append(self.lstm_cell.state_size)
                 self.lstm_init_states[direction].append(self.init_states[direction][i])
                 self.lstm_final_states[direction].append(
@@ -378,11 +402,12 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
                             batch_axis=0
                         )
                     )
+                final_state = [final_hidden_state, final_cell_state]
                 with tf.control_dependencies([hidden_seq]):
                     # update the initial states
                     for j in range(2):
                         new_state = tf.concat(
-                            [final_hidden_state[j][:batch_size, :],
+                            [final_state[j][:batch_size, :],
                              self.init_states[direction][i][j][batch_size:, :]], axis=0)
                         state_update_op = tf.assign(self.init_states[direction][i][j], new_state)
                         update_ops.append(state_update_op)
@@ -390,6 +415,7 @@ class BidirectionalLanguageModelGraph(tf.keras.Model):
         self.mask = mask
         self.sequence_lengths = sequence_lengths
         self.update_state_op = tf.group(*update_ops)
+        return embedding
 
 
 class Convolution(tf.keras.layers.Layer):  # done
@@ -404,6 +430,8 @@ class Convolution(tf.keras.layers.Layer):  # done
         self.b = None
 
     def build(self, input_shape):  # done
+        self.w = []
+        self.b = []
         for i, (width, num) in enumerate(self.filters):
             w_init = None
             if self.cnn_options['activation'] == 'relu':
@@ -423,22 +451,22 @@ class Convolution(tf.keras.layers.Layer):  # done
                     mean=0.0,
                     stddev=np.sqrt(1.0 / (width * self.char_embed_dim))
                 )
-            self.w = self.add_weight(
+            self.w.append(self.add_weight(
                 name="W_cnn_%s" % i,
                 shape=[1, width, self.char_embed_dim, num],
                 initializer=w_init,
-                dtype=DTYPE)
-            self.b = self.add_weight(
+                dtype=DTYPE))
+            self.b.append(self.add_weight(
                 name="b_cnn_%s" % i, shape=[num], dtype=DTYPE,
-                initializer=tf.constant_initializer(0.0))
+                initializer=tf.constant_initializer(0.0)))
 
-    def call(self, inputs, **kwargs):  # done
+    def call(self, inputs, **kwargs):
         convolutions = []
         for i, (width, num) in enumerate(self.filters):
             conv = tf.nn.conv2d(
-                inputs, self.w,
+                inputs, self.w[i],
                 strides=[1, 1, 1, 1],
-                padding="VALID") + self.b
+                padding="VALID") + self.b[i]
             # now max pool
             conv = tf.nn.max_pool(
                 conv, [1, 1, self.max_chars - width + 1, 1],
@@ -449,7 +477,7 @@ class Convolution(tf.keras.layers.Layer):  # done
             conv = tf.squeeze(conv, squeeze_dims=[2])
             convolutions.append(conv)
 
-        return tf.concat(convolutions)
+        return tf.concat(convolutions, 2)
 
 
 class Projection(tf.keras.layers.Layer):
@@ -506,20 +534,20 @@ class Transformation(tf.keras.layers.Layer):
             initializer=tf.random_normal_initializer(
                 mean=0.0, stddev=np.sqrt(1.0 / self.highway_dim)),
             dtype=DTYPE)
-        self.b_transform = self.add_weight(
-            initializer=tf.constant_initializer(0.0),
-            dtype=DTYPE)
+        self.b_transform = self.add_weight('b_transform', [self.highway_dim],
+                                           initializer=tf.constant_initializer(0.0),
+                                           dtype=DTYPE)
 
     def call(self, inputs, **kwargs):
-        high(inputs, self.W_carry, self.b_carry,
-             self.W_transform, self.b_transform)
+        return high(inputs, self.W_carry, self.b_carry,
+                    self.W_transform, self.b_transform)
 
 
 class EmbeddingLookup(tf.keras.layers.Layer):
 
     def __init__(self, n_tokens, embed_dim, trainable=True, name=None, dtype=None, **kwargs):
         super().__init__(trainable, name, dtype, **kwargs)
-        self.n_cbars = n_tokens
+        self.n_chars = n_tokens
         self.char_embed_dim = embed_dim
         self.embedding_weights = None
 
@@ -533,3 +561,229 @@ class EmbeddingLookup(tf.keras.layers.Layer):
     def call(self, inputs, **kwargs):
         return tf.nn.embedding_lookup(self.embedding_weights,
                                       inputs)
+
+
+class TFLSTMCell(tf.keras.layers.Layer):
+    def __init__(self, num_units,
+                 use_peepholes=False, cell_clip=None,
+                 initializer=None, num_proj=None, proj_clip=None,
+                 num_unit_shards=None, num_proj_shards=None,
+                 forget_bias=1.0, state_is_tuple=False,
+                 activation=None, trainable=None, name=None, dtype=None, **kwargs):
+        """Initialize the parameters for an LSTM cell.
+
+        Args:
+          num_units: int, The number of units in the LSTM cell.
+          use_peepholes: bool, set True to enable diagonal/peephole connections.
+          cell_clip: (optional) A float value, if provided the cell state is clipped
+            by this value prior to the cell output activation.
+          initializer: (optional) The initializer to use for the weight and
+            projection matrices.
+          num_proj: (optional) int, The output dimensionality for the projection
+            matrices.  If None, no projection is performed.
+          proj_clip: (optional) A float value.  If `num_proj > 0` and `proj_clip` is
+            provided, then the projected values are clipped elementwise to within
+            `[-proj_clip, proj_clip]`.
+          num_unit_shards: Deprecated, will be removed by Jan. 2017.
+            Use a variable_scope partitioner instead.
+          num_proj_shards: Deprecated, will be removed by Jan. 2017.
+            Use a variable_scope partitioner instead.
+          forget_bias: Biases of the forget gate are initialized by default to 1
+            in order to reduce the scale of forgetting at the beginning of
+            the training. Must set it manually to `0.0` when restoring from
+            CudnnLSTM trained checkpoints.
+          state_is_tuple: If True, accepted and returned states are 2-tuples of
+            the `c_state` and `m_state`.  If False, they are concatenated
+            along the column axis.  This latter behavior will soon be deprecated.
+          activation: Activation function of the inner states.  Default: `tanh`. It
+            could also be string that is within Keras activation function names.
+          reuse: (optional) Python boolean describing whether to reuse variables
+            in an existing scope.  If not `True`, and the existing scope already has
+            the given variables, an error is raised.
+          name: String, the name of the layer. Layers with the same name will
+            share weights, but to avoid mistakes we require reuse=True in such
+            cases.
+          dtype: Default dtype of the layer (default of `None` means use the type
+            of the first input). Required when `build` is called before `call`.
+          **kwargs: Dict, keyword named properties for common layer attributes, like
+            `trainable` etc when constructing the cell from configs of get_config().
+
+          When restoring from CudnnLSTM-trained checkpoints, use
+          `CudnnCompatibleLSTMCell` instead.
+        """
+        super().__init__(trainable=trainable, name=name, dtype=dtype, **kwargs)
+        if not state_is_tuple:
+            logging.warn("%s: Using a concatenated state is slower and will soon be "
+                         "deprecated.  Use state_is_tuple=True.", self)
+        if num_unit_shards is not None or num_proj_shards is not None:
+            logging.warn(
+                "%s: The num_unit_shards and proj_unit_shards parameters are "
+                "depreca    ted and will be removed in Jan 2017.  "
+                "Use a variable scope with a partitioner instead.", self)
+        if context.executing_eagerly() and context.num_gpus() > 0:
+            logging.warn("%s: Note that this cell is not optimized for performance. "
+                         "Please use tf.contrib.cudnn_rnn.CudnnLSTM for better "
+                         "performance on GPU.", self)
+
+        # Inputs must be 2-dimensional.
+        self.input_spec = input_spec.InputSpec(ndim=2)
+
+        self._num_units = num_units
+        self._use_peepholes = use_peepholes
+        self._cell_clip = cell_clip
+        self._initializer = initializers.get(initializer)
+        self._num_proj = num_proj
+        self._proj_clip = proj_clip
+        self._num_unit_shards = num_unit_shards
+        self._num_proj_shards = num_proj_shards
+        self._forget_bias = forget_bias
+        self._state_is_tuple = state_is_tuple
+        self._kernel = None
+        self._bias = None
+        self._w_f_diag = None
+        self._w_i_diag = None
+        self._w_o_diag = None
+        self._proj_kernel = None
+        if activation:
+            self._activation = activations.get(activation)
+        else:
+            self._activation = math_ops.tanh
+
+        if num_proj:
+            self.state_size = [num_proj, num_units]
+            self._output_size = num_proj
+
+        else:
+            self._state_size = [num_units, num_units]
+            self._output_size = num_units
+
+    def build(self, inputs_shape):
+        if inputs_shape[-1] is None:
+            raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
+                             % str(inputs_shape))
+
+        input_depth = inputs_shape[-1]
+        h_depth = self._num_units if self._num_proj is None else self._num_proj
+        self._kernel = self.add_weight(
+            _WEIGHTS_VARIABLE_NAME,
+            shape=[input_depth + h_depth, 4 * self._num_units],
+            initializer=self._initializer)
+        if self.dtype is None:
+            initializer = init_ops.zeros_initializer
+        else:
+            initializer = init_ops.zeros_initializer(dtype=self.dtype)
+        self._bias = self.add_weight(
+            _BIAS_VARIABLE_NAME,
+            shape=[4 * self._num_units],
+            initializer=initializer)
+        if self._use_peepholes:
+            self._w_f_diag = self.add_weight("w_f_diag", shape=[self._num_units],
+                                             initializer=self._initializer)
+            self._w_i_diag = self.add_weight("w_i_diag", shape=[self._num_units],
+                                             initializer=self._initializer)
+            self._w_o_diag = self.add_weight("w_o_diag", shape=[self._num_units],
+                                             initializer=self._initializer)
+
+        if self._num_proj is not None:
+            self._proj_kernel = self.add_variable(
+                "projection/%s" % _WEIGHTS_VARIABLE_NAME,
+                shape=[self._num_units, self._num_proj],
+                initializer=self._initializer)
+
+        self.built = True
+
+    def call(self, inputs, state, training=None):
+        """Run one step of LSTM.
+
+        Args:
+          inputs: input Tensor, must be 2-D, `[batch, input_size]`.
+          state: if `state_is_tuple` is False, this must be a state Tensor,
+            `2-D, [batch, state_size]`.  If `state_is_tuple` is True, this must be a
+            tuple of state Tensors, both `2-D`, with column sizes `c_state` and
+            `m_state`.
+
+        Returns:
+          A tuple containing:
+
+          - A `2-D, [batch, output_dim]`, Tensor representing the output of the
+            LSTM after reading `inputs` when previous state was `state`.
+            Here output_dim is:
+               num_proj if num_proj was set,
+               num_units otherwise.
+          - Tensor(s) representing the new state of LSTM after reading `inputs` when
+            the previous state was `state`.  Same type and shape(s) as `state`.
+
+        Raises:
+          ValueError: If input size cannot be inferred from inputs via
+            static shape inference.
+        """
+        num_proj = self._num_units if self._num_proj is None else self._num_proj
+        sigmoid = math_ops.sigmoid
+
+        print("State:")
+        print(state)
+        print("input:")
+        print(inputs)
+        print("proj num")
+        print(self._num_proj)
+
+        [m_prev, c_prev] = state
+        input_size = inputs.get_shape().with_rank(2).dims[1].value
+        if input_size is None:
+            raise ValueError("Could not infer input size from inputs.get_shape()[-1]")
+
+        # i = input_gate, j = new_input, f = forget_gate, o = output_gate
+        lstm_matrix = tf.matmul(
+            array_ops.concat([inputs, m_prev], 1), self._kernel)
+        lstm_matrix = nn_ops.bias_add(lstm_matrix, self._bias)
+
+        i, j, f, o = array_ops.split(
+            value=lstm_matrix, num_or_size_splits=4, axis=1)
+        # Diagonal connections
+        if self._use_peepholes:
+            c = (sigmoid(f + self._forget_bias + self._w_f_diag * c_prev) * c_prev +
+                 sigmoid(i + self._w_i_diag * c_prev) * self._activation(j))
+        else:
+            c = (sigmoid(f + self._forget_bias) * c_prev + sigmoid(i) *
+                 self._activation(j))
+
+        if self._cell_clip is not None:
+            # pylint: disable=invalid-unary-operand-type
+            c = clip_ops.clip_by_value(c, -self._cell_clip, self._cell_clip)
+            # pylint: enable=invalid-unary-operand-type
+        if self._use_peepholes:
+            m = sigmoid(o + self._w_o_diag * c) * self._activation(c)
+        else:
+            m = sigmoid(o) * self._activation(c)
+
+        if self._num_proj is not None:
+            m = math_ops.matmul(m, self._proj_kernel)
+
+            if self._proj_clip is not None:
+                # pylint: disable=invalid-unary-operand-type
+                m = clip_ops.clip_by_value(m, -self._proj_clip, self._proj_clip)
+                # pylint: enable=invalid-unary-operand-type
+
+        return m, [m, c]
+
+
+_LSTMStateTuple = collections.namedtuple("LSTMStateTuple", ("c", "h"))
+
+
+class LSTMStateTuple(_LSTMStateTuple):
+    """Tuple used by LSTM Cells for `state_size`, `zero_state`, and output state.
+
+    Stores two elements: `(c, h)`, in that order. Where `c` is the hidden state
+    and `h` is the output.
+
+    Only used when `state_is_tuple=True`.
+    """
+    __slots__ = ()
+
+    @property
+    def dtype(self):
+        (c, h) = self
+        if c.dtype != h.dtype:
+            raise TypeError("Inconsistent internal state: %s vs %s" %
+                            (str(c.dtype), str(h.dtype)))
+        return c.dtype

@@ -2,7 +2,7 @@ import tensorflow as tf
 
 
 class WeightLayer(tf.keras.layers.Layer):
-    '''
+    """
     Weight the layers of a biLM with trainable scalar weights to
     compute ELMo representations.
 
@@ -13,11 +13,11 @@ class WeightLayer(tf.keras.layers.Layer):
     bilm_ops = the tensorflow ops returned to compute internal
         representations from a biLM.  This is the return value
         from BidirectionalLanguageModel(...)(ids_placeholder)
-    '''
+    """
 
     def __init__(self, l2_coef=None, trainable=True, name=None,
                  dtype=None, **kwargs):
-        '''
+        """
 
         :param l2_coef: the l2 regularization coefficient $\lambda$.
             Pass None or 0.0 for no regularization.
@@ -26,7 +26,7 @@ class WeightLayer(tf.keras.layers.Layer):
         :param name: a string prefix used for the trainable variable names
         :param dtype: dtype
         :param kwargs:
-        '''
+        """
         super().__init__(trainable, name, dtype, **kwargs)
         self.l2_coef = l2_coef
         self.W = None
@@ -46,7 +46,7 @@ class WeightLayer(tf.keras.layers.Layer):
                                      initializer=tf.ones_initializer, regularizer=None, trainable=True)
 
     def call(self, inputs, mask=None, use_top_only=False, do_layer_norm=False):
-        '''
+        """
 
         :param inputs: bilm_ops['lm_embeddings']
         :param mask: bilm_ops['mask']
@@ -58,7 +58,7 @@ class WeightLayer(tf.keras.layers.Layer):
             'weighted_op': op to compute weighted average for output,
             'regularization_op': op to compute regularization term
             }
-        '''
+        """
         # Get ops for computing LM embeddings and mask
 
         n_lm_layers = int(inputs.get_shape()[1])
@@ -85,7 +85,6 @@ class WeightLayer(tf.keras.layers.Layer):
                 # just the top layer
                 sum_pieces = tf.squeeze(layers[-1], squeeze_dims=1)
                 # no regularization
-                reg = 0.0
 
             else:
                 # normalize the weights
@@ -104,17 +103,8 @@ class WeightLayer(tf.keras.layers.Layer):
                         pieces.append(w * tf.squeeze(t, squeeze_dims=1))
                 sum_pieces = tf.add_n(pieces)
 
-                # get the regularizer
-                reg = [
-                    r for r in tf.get_collection(
-                        tf.GraphKeys.REGULARIZATION_LOSSES)
-                    if r.name.find('{}_ELMo_W/'.format(self.name)) >= 0
-                ]
-                if len(reg) != 1:
-                    raise ValueError
-
             weighted_lm_layers = sum_pieces * self.gamma
 
-            ret = {'weighted_op': weighted_lm_layers, 'regularization_op': reg}
+            ret = weighted_lm_layers
 
         return ret
