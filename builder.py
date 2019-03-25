@@ -36,7 +36,7 @@ def builder(options_file, weight_file, use_character_inputs=True, embedding_weig
         assigns = []
         variables = tf.global_variables()
         transformer_variables = sorted(zip((var.name.lower() for var in variables), variables), key=lambda t: t[0])
-        off_ELMo_pairs = sorted(zip((var.name.lower() for var in gb), W), key=lambda t: t[0])
+        off_ELMo_pairs = sorted(zip((var.name.lower() for var in gb), official_ELMo_varaibles), key=lambda t: t[0])
         for i in range(len(transformer_variables)):
             if transformer_variables[i][0][-12:-4] == "variable" and int(transformer_variables[i][0][-3]) % 2 == 1:
                 transformer_variables[i], transformer_variables[i - 1] = transformer_variables[i - 1], \
