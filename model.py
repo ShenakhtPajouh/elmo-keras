@@ -297,15 +297,16 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
 
         for direction in ['forward', 'backward']:
             for i in range(self.n_lstm_layers):
+                residual = use_skip_connections and i != 0
                 if projection_dim < lstm_dim:
                     # are projecting down output
                     self.lstm_cell = TFLSTMCell(
-                        lstm_dim, num_proj=projection_dim,
+                        lstm_dim, num_proj=projection_dim, residual_connection=residual,
                         cell_clip=cell_clip, proj_clip=proj_clip)
                 else:
                     self.lstm_cell = TFLSTMCell(
                         lstm_dim,
-                        cell_clip=cell_clip, proj_clip=proj_clip)
+                        cell_clip=cell_clip, proj_clip=proj_clip, residual_connection=residual)
 
                 # collect the input state, run the dynamic rnn, collect
                 # the output
@@ -569,7 +570,7 @@ class TFLSTMCell(tf.keras.layers.Layer):
                  initializer=None, num_proj=None, proj_clip=None,
                  num_unit_shards=None, num_proj_shards=None,
                  forget_bias=1.0, state_is_tuple=False,
-                 activation=None, trainable=None, name=None, dtype=None, **kwargs):
+                 activation=None, trainable=None, name=None, dtype=None, residual_connection=False, **kwargs):
         """Initialize the parameters for an LSTM cell.
 
         Args:
@@ -638,6 +639,7 @@ class TFLSTMCell(tf.keras.layers.Layer):
         self._num_proj_shards = num_proj_shards
         self._forget_bias = forget_bias
         self._state_is_tuple = state_is_tuple
+        self.residual_connection = residual_connection
         self._kernel = None
         self._bias = None
         self._w_f_diag = None
@@ -763,27 +765,7 @@ class TFLSTMCell(tf.keras.layers.Layer):
                 # pylint: disable=invalid-unary-operand-type
                 m = clip_ops.clip_by_value(m, -self._proj_clip, self._proj_clip)
                 # pylint: enable=invalid-unary-operand-type
-
-        return m, [m, c]
-
-
-_LSTMStateTuple = collections.namedtuple("LSTMStateTuple", ("c", "h"))
-
-
-class LSTMStateTuple(_LSTMStateTuple):
-    """Tuple used by LSTM Cells for `state_size`, `zero_state`, and output state.
-
-    Stores two elements: `(c, h)`, in that order. Where `c` is the hidden state
-    and `h` is the output.
-
-    Only used when `state_is_tuple=True`.
-    """
-    __slots__ = ()
-
-    @property
-    def dtype(self):
-        (c, h) = self
-        if c.dtype != h.dtype:
-            raise TypeError("Inconsistent internal state: %s vs %s" %
-                            (str(c.dtype), str(h.dtype)))
-        return c.dtype
+        o = m
+        if self.residual_connection:
+            o = o + inputs
+        return o, [m, c]
