@@ -16,7 +16,8 @@ def builder(options_file, weight_file, use_character_inputs=True, embedding_weig
         context_embeddings_op = bilm(context_character_ids)
         elmo_context_input = elmo.weight_layers('input', context_embeddings_op, l2_coef=0.0)
 
-    sess = tf.Session(graph=graph)
+    conf = tf.ConfigProto(device_count={'GPU': 0})
+    sess = tf.Session(graph=graph, config=conf)
 
     with graph.as_default():
         sess.run(tf.global_variables_initializer())
@@ -34,7 +35,9 @@ def builder(options_file, weight_file, use_character_inputs=True, embedding_weig
         keras_elmo_context_input = keras_w(keras_context_embeddings_op['lm_embeddings'],
                                            keras_context_embeddings_op['mask'])
         assigns = []
-        variables = tf.global_variables()
+        variables = []
+        variables.extend(set(keras_bilm.variables))
+        variables.extend(set(keras_w.variables))
         transformer_variables = sorted(zip((var.name.lower() for var in variables), variables), key=lambda t: t[0])
         off_ELMo_pairs = sorted(zip((var.name.lower() for var in gb), official_ELMo_varaibles), key=lambda t: t[0])
         for i in range(len(transformer_variables)):
