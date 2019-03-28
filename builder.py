@@ -57,4 +57,4 @@ def builder(options_file, weight_file, use_character_inputs=True, embedding_weig
             node, assigns = _f()
         _ = session.run(assigns)
 
-    return node
+    return keras_model, keras_elmo
