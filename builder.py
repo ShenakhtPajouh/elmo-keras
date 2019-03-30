@@ -46,15 +46,15 @@ def builder(options_file, weight_file, use_character_inputs=True, embedding_weig
                                                                          transformer_variables[i]
         for i in range(len(transformer_variables)):
             assigns.append(tf.assign(transformer_variables[i][1], off_ELMo_pairs[i][1]))
-        return keras_elmo_context_input, assigns
+        return keras_bilm, keras_w, assigns
 
     if tf.executing_eagerly() and session is None:
-        node, _ = _f()
+        keras_bilm, keras_w, _ = _f()
     else:
         if session is None:
             session = tf.get_default_session()
         with session.graph.as_default():
-            node, assigns = _f()
+            keras_bilm, keras_w, assigns = _f()
         _ = session.run(assigns)
 
-    return keras_model, keras_elmo
+    return keras_bilm, keras_w
