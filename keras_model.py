@@ -23,7 +23,6 @@ _WEIGHTS_VARIABLE_NAME = "kernel"
 
 class BidirectionalLanguageModel(tf.keras.models.Model):
     def __init__(self, options_file: str,
-                 weight_file: str,
                  use_character_inputs=True,
                  embedding_weight_file=None,
                  max_batch_size=128, *args, **kwargs):
@@ -58,7 +57,6 @@ class BidirectionalLanguageModel(tf.keras.models.Model):
                     "not use_character_inputs"
                 )
         self._options = options
-        self._weight_file = weight_file
         self._embedding_weight_file = embedding_weight_file
         self._use_character_inputs = use_character_inputs
         self._max_batch_size = max_batch_size
