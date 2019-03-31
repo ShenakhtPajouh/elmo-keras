@@ -26,7 +26,7 @@ def builder(options_file, weight_file, use_character_inputs=True, embedding_weig
 
     def _f():
         keras_context_character_ids = tf.placeholder('int32', shape=(None, None, 50))
-        keras_bilm = keras_model.BidirectionalLanguageModel(options_file, weight_file,
+        keras_bilm = keras_model.BidirectionalLanguageModel(options_file,
                                                             use_character_inputs=use_character_inputs,
                                                             embedding_weight_file=embedding_weight_file,
                                                             max_batch_size=max_batch_size, name=name)
