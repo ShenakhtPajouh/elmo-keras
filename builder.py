@@ -5,11 +5,14 @@ import model
 import elmo
 
 
-def builder(options_file, weight_file, use_character_inputs=True, embedding_weight_file=None, max_batch_size=128,
-            name=None, session=None):
+def builder(options_file, weight_file, use_character_inputs=True, embedding_weight_file=None, max_token_length=50,
+            max_batch_size=128, name=None, session=None):
     graph = tf.Graph()
     with graph.as_default():
-        context_character_ids = tf.placeholder('int32', shape=(None, None, 50))
+        if use_character_inputs:
+            context_character_ids = tf.placeholder('int32', shape=(None, None, max_token_length))
+        else:
+            context_character_ids = tf.placeholder('int32', shape=(None, None))
         bilm = model.BidirectionalLanguageModel(options_file, weight_file, use_character_inputs=use_character_inputs,
                                                 embedding_weight_file=embedding_weight_file,
                                                 max_batch_size=max_batch_size)
@@ -25,9 +28,11 @@ def builder(options_file, weight_file, use_character_inputs=True, embedding_weig
         official_ELMo_varaibles = sess.run(gb)
 
     def _f():
-        keras_context_character_ids = tf.placeholder('int32', shape=(None, None, 50))
-        keras_bilm = keras_model.BidirectionalLanguageModel(options_file,
-                                                            use_character_inputs=use_character_inputs,
+        if use_character_inputs:
+            keras_context_character_ids = tf.placeholder('int32', shape=(None, None, max_token_length))
+        else:
+            keras_context_character_ids = tf.placeholder('int32', shape=(None, None))
+        keras_bilm = keras_model.BidirectionalLanguageModel(options_file, use_character_inputs=use_character_inputs,
                                                             embedding_weight_file=embedding_weight_file,
                                                             max_batch_size=max_batch_size, name=name)
         keras_w = keras_elmo.WeightLayer(name='input', l2_coef=0.0)
