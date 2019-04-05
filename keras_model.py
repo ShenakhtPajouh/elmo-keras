@@ -13,6 +13,7 @@ from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_ops
 from tensorflow.python.platform import tf_logging as logging
+from .data import UnicodeCharsVocabulary, Batcher
 
 DTYPE = 'float32'
 DTYPE_INT = 'int64'
@@ -73,7 +74,7 @@ class BidirectionalLanguageModel(tf.keras.models.Model):
 
         else:
             # need to create the graph
-            token_embeddings = self.lm_graph(inputs=inputs)
+            token_embeddings = self.lm_graph(inputs=inputs, training=training)
             ops = self._build_ops(token_embeddings)
             self._ops[inputs] = ops
             ret = ops
@@ -320,6 +321,7 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
                                         cell=self.lstm_cell, return_sequences=True, return_state=True))
 
     def build(self, input_shape):
+        super().build(input_shape)
         for direction in ['forward', 'backward']:
             for i in range(self.n_lstm_layers):
                 self.init_states[direction].append([
@@ -428,6 +430,7 @@ class Convolution(tf.keras.layers.Layer):  # done
         self.b = None
 
     def build(self, input_shape):  # done
+        super().build(input_shape)
         self.w = []
         self.b = []
         for i, (width, num) in enumerate(self.filters):
@@ -490,6 +493,7 @@ class Projection(tf.keras.layers.Layer):
         return tf.matmul(inputs, self.W_proj_cnn) + self.b_proj_cnn
 
     def build(self, input_shape):
+        super().build(input_shape)
         self.W_proj_cnn = self.add_weight(
             name="W_proj", shape=[self.n_filters, self.projection_dim],
             initializer=tf.random_normal_initializer(
@@ -517,6 +521,7 @@ class Transformation(tf.keras.layers.Layer):
         self.b_transform = None
 
     def build(self, input_shape):
+        super().build(input_shape)
         self.W_carry = self.add_weight(
             'W_carry', [self.highway_dim, self.highway_dim],
             # glorit init
@@ -550,6 +555,7 @@ class EmbeddingLookup(tf.keras.layers.Layer):
         self.embedding_weights = None
 
     def build(self, input_shape):
+        super().build(input_shape)
         self.embedding_weights = self.add_weight(
             "char_embed", [self.n_chars, self.char_embed_dim],
             dtype=DTYPE,
@@ -653,6 +659,7 @@ class TFLSTMCell(tf.keras.layers.Layer):
             self._output_size = num_units
 
     def build(self, inputs_shape):
+        super().build(inputs_shape)
         if inputs_shape[-1] is None:
             raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s"
                              % str(inputs_shape))
@@ -762,3 +769,44 @@ class TFLSTMCell(tf.keras.layers.Layer):
         if self.residual_connection:
             o = o + inputs
         return o, [m, c]
+
+
+def dump_token_embeddings(vocab_file, options_file, weight_file, outfile):
+    """
+    Given an input vocabulary file, dump all the token embeddings to the
+    outfile.  The result can be used as the embedding_weight_file when
+    constructing a BidirectionalLanguageModel.
+    """
+    with open(options_file, 'r') as fin:
+        options = json.load(fin)
+    max_word_length = options['char_cnn']['max_characters_per_token']
+
+    vocab = UnicodeCharsVocabulary(vocab_file, max_word_length)
+    batcher = Batcher(vocab_file, max_word_length)
+
+    ids_placeholder = tf.placeholder('int32',
+                                     shape=(None, None, max_word_length)
+                                     )
+    model = BidirectionalLanguageModel(options_file, weight_file)
+    embedding_op = model(ids_placeholder)['token_embeddings']
+
+    n_tokens = vocab.size
+    embed_dim = int(embedding_op.shape[2])
+
+    embeddings = np.zeros((n_tokens, embed_dim), dtype=DTYPE)
+
+    config = tf.ConfigProto(allow_soft_placement=True)
+    with tf.Session(config=config) as sess:
+        sess.run(tf.global_variables_initializer())
+        for k in range(n_tokens):
+            token = vocab.id_to_word(k)
+            char_ids = batcher.batch_sentences([[token]])[0, 1, :].reshape(
+                1, 1, -1)
+            embeddings[k, :] = sess.run(
+                embedding_op, feed_dict={ids_placeholder: char_ids}
+            )
+
+    with h5py.File(outfile, 'w') as fout:
+        ds = fout.create_dataset(
+            'embedding', embeddings.shape, dtype='float32', data=embeddings
+        )
