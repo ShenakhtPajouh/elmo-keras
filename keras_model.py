@@ -280,7 +280,7 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
             print("NOT USING SKIP CONNECTIONS")
 
         # for each direction, we'll store tensors for each layer
-        self.lstm_outputs = {'forward': [], 'backward': []}
+        self.lstm_outputs = None
         self.lstm_state_sizes = {'forward': [], 'backward': []}
         self.lstm_init_states = {'forward': [], 'backward': []}
         self.lstm_final_states = {'forward': [], 'backward': []}
@@ -330,6 +330,7 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
         self.built = True
 
     def call(self, inputs, training=None, mask=None):
+        self.lstm_outputs = {'forward': [], 'backward': []}
         embedding = None
         if self.use_character_inputs:
             with tf.device("/cpu:0"):
