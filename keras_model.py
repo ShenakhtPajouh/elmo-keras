@@ -76,7 +76,6 @@ class BidirectionalLanguageModel(tf.keras.models.Model):
             ops = self._build_ops(token_embeddings)
             self._ops[inputs] = ops
             ret = ops
-
         return ret
 
     def _build_ops(self, token_embeddings):
@@ -389,6 +388,7 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
                 self.lstm_init_states[direction].append(self.init_states[direction][i])
                 self.lstm_final_states[direction].append(
                     tf.nn.rnn_cell.LSTMStateTuple(final_cell_state, final_hidden_state))
+                # print("here?")
                 if direction == 'forward':
                     self.lstm_outputs[direction].append(hidden_seq)
                 else:
@@ -413,7 +413,7 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
         self.mask = mask
         self.sequence_lengths = sequence_lengths
         self.update_state_op = tf.group(*update_ops)
-        return embedding
+        return self.embedding
 
 
 class Convolution(tf.keras.layers.Layer):  # done
