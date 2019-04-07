@@ -28,7 +28,6 @@ class BidirectionalLanguageModel(tf.keras.models.Model):
                  max_batch_size=128, *args, **kwargs):
         """
         Creates the language model computational graph and loads weights
-
         Two options for input type:
             (1) To use character inputs (paired with Batcher)
                 pass use_character_inputs=True, and ids_placeholder
@@ -38,7 +37,6 @@ class BidirectionalLanguageModel(tf.keras.models.Model):
                 pass use_character_inputs=False and ids_placeholder
                 of shape (None, None) to __call__.
                 In this case, embedding_weight_file is also required input
-
         options_file: location of the json formatted file with
                       LM hyperparameters
         weight_file: location of the hdf5 file with LM weights
@@ -321,16 +319,15 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
                                         cell=self.lstm_cell, return_sequences=True, return_state=True))
 
     def build(self, input_shape):
-        super().build(input_shape)
         for direction in ['forward', 'backward']:
             for i in range(self.n_lstm_layers):
                 self.init_states[direction].append([
-                    self.add_weight(name='Variable',
-                                    shape=[self._max_batch_size, dim], trainable=False,
-                                    initializer=tf.zeros_initializer(), dtype=DTYPE
-                                    )
+                    tf.keras.backend.variable(name='Variable', value=tf.zeros(shape=[self._max_batch_size, dim]),
+                                              dtype=DTYPE
+                                              )
                     for dim in self.lstm_cell.state_size
                 ])
+        self.built = True
 
     def call(self, inputs, training=None, mask=None):
         embedding = None
@@ -555,12 +552,12 @@ class EmbeddingLookup(tf.keras.layers.Layer):
         self.embedding_weights = None
 
     def build(self, input_shape):
-        super().build(input_shape)
         self.embedding_weights = self.add_weight(
             "char_embed", [self.n_chars, self.char_embed_dim],
             dtype=DTYPE,
             initializer=tf.random_uniform_initializer(-1.0, 1.0)
         )
+        super().build(input_shape)
 
     def call(self, inputs, **kwargs):
         return tf.nn.embedding_lookup(self.embedding_weights,
@@ -575,7 +572,6 @@ class TFLSTMCell(tf.keras.layers.Layer):
                  forget_bias=1.0, state_is_tuple=False,
                  activation=None, trainable=None, name=None, dtype=None, residual_connection=False, **kwargs):
         """Initialize the parameters for an LSTM cell.
-
         Args:
           num_units: int, The number of units in the LSTM cell.
           use_peepholes: bool, set True to enable diagonal/peephole connections.
@@ -611,7 +607,6 @@ class TFLSTMCell(tf.keras.layers.Layer):
             of the first input). Required when `build` is called before `call`.
           **kwargs: Dict, keyword named properties for common layer attributes, like
             `trainable` etc when constructing the cell from configs of get_config().
-
           When restoring from CudnnLSTM-trained checkpoints, use
           `CudnnCompatibleLSTMCell` instead.
         """
@@ -696,17 +691,14 @@ class TFLSTMCell(tf.keras.layers.Layer):
 
     def call(self, inputs, state, training=None):
         """Run one step of LSTM.
-
         Args:
           inputs: input Tensor, must be 2-D, `[batch, input_size]`.
           state: if `state_is_tuple` is False, this must be a state Tensor,
             `2-D, [batch, state_size]`.  If `state_is_tuple` is True, this must be a
             tuple of state Tensors, both `2-D`, with column sizes `c_state` and
             `m_state`.
-
         Returns:
           A tuple containing:
-
           - A `2-D, [batch, output_dim]`, Tensor representing the output of the
             LSTM after reading `inputs` when previous state was `state`.
             Here output_dim is:
@@ -714,20 +706,12 @@ class TFLSTMCell(tf.keras.layers.Layer):
                num_units otherwise.
           - Tensor(s) representing the new state of LSTM after reading `inputs` when
             the previous state was `state`.  Same type and shape(s) as `state`.
-
         Raises:
           ValueError: If input size cannot be inferred from inputs via
             static shape inference.
         """
         num_proj = self._num_units if self._num_proj is None else self._num_proj
         sigmoid = math_ops.sigmoid
-
-        print("State:")
-        print(state)
-        print("input:")
-        print(inputs)
-        print("proj num")
-        print(self._num_proj)
 
         [m_prev, c_prev] = state
         input_size = inputs.get_shape().with_rank(2).dims[1].value
