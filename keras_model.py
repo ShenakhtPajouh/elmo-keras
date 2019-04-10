@@ -284,6 +284,7 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
         self.lstm_init_states = {'forward': [], 'backward': []}
         self.lstm_final_states = {'forward': [], 'backward': []}
         self.init_states = {'forward': [], 'backward': []}
+        self.lstm_cells = {'forward': [], 'backward': []}
         self.RNN = {'forward': [], 'backward': []}
         cell_clip = self.options['lstm'].get('cell_clip')
         proj_clip = self.options['lstm'].get('proj_clip')
@@ -302,7 +303,7 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
                     self.lstm_cell = TFLSTMCell(
                         lstm_dim,
                         cell_clip=cell_clip, proj_clip=proj_clip, residual_connection=residual)
-
+                self.lstm_cells[direction].append(self.lstm_cell)
                 # collect the input state, run the dynamic rnn, collect
                 # the output
                 # the LSTMs are stateful.  To support multiple batch sizes,
@@ -330,35 +331,8 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
 
     def call(self, inputs, training=None, mask=None):
         self.lstm_outputs = {'forward': [], 'backward': []}
-        embedding = None
-        if self.use_character_inputs:
-            with tf.device("/cpu:0"):
-                char_embedding = self.Char_Embedding(inputs)
-            embedding = self.ConvLayer(char_embedding)
-            batch_size_n_tokens = None
 
-            if self.use_highway or self.use_proj:
-                #   reshape from (batch_size, n_tokens, dim) to (-1, dim)
-                batch_size_n_tokens = tf.shape(embedding)[0:2]
-                embedding = tf.reshape(embedding, [-1, self.n_filters])
-
-            if self.use_highway:
-                for i in range(self.n_highway):
-                    embedding = self.transformation_layers[i](embedding)
-
-            # finally project down if needed
-            if self.use_proj:
-                embedding = self.projection_layer(embedding)
-
-            if self.use_highway or self.use_proj:
-                shp = tf.concat([batch_size_n_tokens, [self.projection_dim]], axis=0)
-                embedding = tf.reshape(embedding, shp)
-
-            self.embedding = embedding
-        else:
-            with tf.device("/cpu:0"):
-                self.embedding = self.EmbeddingLookup(inputs)
-
+        self.embedding = self.input_pre_process(inputs)
         # the sequence lengths from input mask
         if self.use_character_inputs:
             mask = tf.reduce_any(inputs > 0, axis=2)
@@ -414,6 +388,41 @@ class BidirectionalLanguageModelGraph(tf.keras.models.Model):
         self.sequence_lengths = sequence_lengths
         self.update_state_op = tf.group(*update_ops)
         return self.embedding
+
+    def input_pre_process(self, inputs):
+        embedding = None
+        if self.use_character_inputs:
+            with tf.device("/cpu:0"):
+                char_embedding = self.Char_Embedding(inputs)
+            embedding = self.ConvLayer(char_embedding)
+            batch_size_n_tokens = None
+
+            if self.use_highway or self.use_proj:
+                #   reshape from (batch_size, n_tokens, dim) to (-1, dim)
+                batch_size_n_tokens = tf.shape(embedding)[0:2]
+                embedding = tf.reshape(embedding, [-1, self.n_filters])
+
+            if self.use_highway:
+                for i in range(self.n_highway):
+                    embedding = self.transformation_layers[i](embedding)
+
+            # finally project down if needed
+            if self.use_proj:
+                embedding = self.projection_layer(embedding)
+
+            if self.use_highway or self.use_proj:
+                shp = tf.concat([batch_size_n_tokens, [self.projection_dim]], axis=0)
+                embedding = tf.reshape(embedding, shp)
+
+        else:
+            with tf.device("/cpu:0"):
+                embedding = self.EmbeddingLookup(inputs)
+
+        return embedding
+
+    # def get_configs(self):
+    #     return self.use_char_inputs, self.Char_Embedding, self.ConvLayer, self.use_highway, self.use_proj, \
+    #            self.n_filters, self.n_highway, self.transformation_layers,
 
 
 class Convolution(tf.keras.layers.Layer):  # done
